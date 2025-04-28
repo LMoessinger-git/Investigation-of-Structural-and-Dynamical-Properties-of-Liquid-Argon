@@ -67,9 +67,3 @@ Each script is independent and can be run individually inside a Jupyter Notebook
 Simply execute the cells from top to bottom to perform the simulations and visualize the results.
 
 ---
-
-## License
-
-This project is for educational and research purposes only.
-
----
