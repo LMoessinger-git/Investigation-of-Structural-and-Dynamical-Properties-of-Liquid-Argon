@@ -11,8 +11,8 @@ All simulations use a Lennard-Jones potential, linked-cell neighbor lists, and v
 | Script/Notebook | Description |
 |:----------------|:------------|
 | **Diffusion Coefficient Calculation.jpynb** | Computes the Mean Squared Displacement (MSD) and diffusion constants for Argon atoms under different thermostats (NVE, Berendsen, Langevin). |
-| **rdf_calculation.py** | Calculates the Radial Distribution Function (RDF) of liquid Argon, focusing on structural analysis at a specified temperature. |
-| **vacf_and_spectrum.py** | Computes the Velocity Autocorrelation Function (VACF) and its Fourier spectrum to analyze vibrational properties of the system. |
+| **RDF Calculation.ipynb** | Calculates the Radial Distribution Function (RDF) of liquid Argon, focusing on structural analysis at a specified temperature. |
+| **VACF Calculation.ipynb** | Computes the Velocity Autocorrelation Function (VACF) and its Fourier spectrum to analyze vibrational properties of the system. |
 
 ---
 
