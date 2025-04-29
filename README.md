@@ -19,7 +19,7 @@ All simulations use a Lennard-Jones potential, linked-cell neighbor lists, and v
 ## Methods Overview
 
 - **Lennard-Jones Interactions**:  
-  Argon atoms are modeled via a truncated and shifted 12-6 Lennard-Jones potential, with $\sigma = 3.4$ Å and $\epsilon = 1.656 \times 10^{-21}$ J.
+  Argon atoms are modeled via a truncated and shifted Lennard-Jones potential, with $\sigma = 3.4$ Å and $\epsilon = 1.656 \times 10^{-21}$ J.
   
 - **Linked-Cell Algorithm**:  
   Speeds up force computation by reducing neighbor search complexity from $\mathcal{O}(N^2)$ to approximately $\mathcal{O}(N)$.
@@ -46,8 +46,7 @@ All simulations use a Lennard-Jones potential, linked-cell neighbor lists, and v
 ## Features and Outputs
 
 ### Diffusion Analysis
-- Calculate MSD vs. time for different thermostats.
-- Extract diffusion coefficients via the Einstein relation.
+- Extract diffusion coefficients.
 - Compare diffusion constants against Rahman's reported value ($D_\mathrm{Rahman} \approx 2.43 \times 10^{-9}\,\mathrm{m^2/s}$).
 
 ### Radial Distribution Function (RDF)
