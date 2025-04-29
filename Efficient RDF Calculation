@@ -1,0 +1,234 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+from numba import njit
+
+# Set random seed for reproducibility
+np.random.seed(42)
+
+# Physical constants for Argon
+sigma = 3.4e-10  # m
+epsilon = 1.656e-21  # J
+mass_argon = 39.95 * 1.66054e-27  # kg
+density = 1374  # kg/m³
+kb = 1.380649e-23  # Boltzmann constant
+
+@njit
+def build_linked_cells(positions, box_size, rcutoff):
+    n_particles, dim = positions.shape
+    lc = max(1, int(np.floor(box_size / rcutoff)))
+    cells = lc ** dim
+    head = np.full(cells, -1, np.int64)
+    lscl = np.full(n_particles, -1, np.int64)
+    rc = box_size / lc
+
+    for i in range(n_particles):
+        # Ensure consistent cell assignment
+        pos = positions[i] % box_size  # Apply PBC first
+        mc0 = min(max(0, int(pos[0] / rc)), lc-1)
+        mc1 = min(max(0, int(pos[1] / rc)), lc-1)
+        mc2 = min(max(0, int(pos[2] / rc)), lc-1)
+        idx = mc0 * lc * lc + mc1 * lc + mc2
+        lscl[i] = head[idx]
+        head[idx] = i
+
+    return head, lscl, lc
+
+@njit #(fastmath=True)
+def compute_forces_lca(positions, box_size, rcutoff, sigma, epsilon, use_pbc):
+    n_particles, dim = positions.shape
+    head, lscl, lc = build_linked_cells(positions, box_size, rcutoff)
+    forces = np.zeros_like(positions)
+    potential = 0.0
+    rcut2 = rcutoff * rcutoff
+    sigma2 = sigma * sigma
+    # loop over all cells
+    for idx in range(lc**3):
+        # decode cell coords
+        mc2 = idx % lc
+        tmp = idx // lc
+        mc1 = tmp % lc
+        mc0 = tmp // lc
+        i = head[idx]
+        # iterate particles in cell
+        while i != -1:
+            xi = positions[i]
+            # neighbor cells
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    for dz in (-1, 0, 1):
+                        nx = (mc0 + dx) % lc
+                        ny = (mc1 + dy) % lc
+                        nz = (mc2 + dz) % lc
+                        nidx = nx * lc * lc + ny * lc + nz
+                        j = head[nidx]
+                        # periodic shift
+                        sx = dx * box_size
+                        sy = dy * box_size
+                        sz = dz * box_size
+                        while j != -1:
+                            if j > i:
+                                xj = positions[j]
+                                # apply shift
+                                xj0 = xj[0] + sx
+                                xj1 = xj[1] + sy
+                                xj2 = xj[2] + sz
+                                # compute r2
+                                dx0 = xi[0] - xj0
+                                dx1 = xi[1] - xj1
+                                dx2 = xi[2] - xj2
+                                r2 = dx0*dx0 + dx1*dx1 + dx2*dx2
+                                if r2 < rcut2:
+                                # Use more stable computation similar to initial version
+                                    r = np.sqrt(r2)
+                                    if r < rcutoff and r > 1e-12:
+                                        inv_r = sigma / r
+                                        inv_r6 = inv_r ** 6
+                                        inv_r12 = inv_r6 * inv_r6
+
+                                        pot = 4 * epsilon * (inv_r12 - inv_r6)
+                                        inv_rcut = sigma / rcutoff
+                                        shift = 4 * epsilon * (inv_rcut ** 12 - inv_rcut ** 6)
+                                        potential += pot - shift
+
+                                        # Update forces
+                                        fmag = 24 * epsilon * (2 * inv_r12 - inv_r6) / r
+                                        forces[i, 0] += fmag * dx0 / r
+                                        forces[i, 1] += fmag * dx1 / r
+                                        forces[i, 2] += fmag * dx2 / r
+                                        forces[j, 0] -= fmag * dx0 / r
+                                        forces[j, 1] -= fmag * dx1 / r
+                                        forces[j, 2] -= fmag * dx2 / r
+
+                            j = lscl[j]
+            i = lscl[i]
+    return forces, potential
+
+# thermostats unchanged
+def apply_berendsen_thermostat(velocities, target_temp, current_temp, dt, tau):
+    lambda_factor = np.sqrt(1 + dt / tau * (target_temp / current_temp - 1))
+    return velocities * lambda_factor
+
+def apply_langevin_thermostat(velocities, gamma, dt, target_temp):
+    noise = np.random.normal(0, 1, size=velocities.shape)
+    c1 = np.exp(-gamma * dt)
+    c2 = np.sqrt((1 - c1 ** 2) * kb * target_temp / mass_argon)
+    return c1 * velocities + c2 * noise
+
+def create_lattice(n_particles, box_size, dimensions):
+    n_side = int(np.ceil(n_particles ** (1 / dimensions)))
+    spacing = box_size / n_side
+    positions = []
+    for indices in np.ndindex(*([n_side] * dimensions)):
+        if len(positions) < n_particles:
+            pos = [(i + 0.5) * spacing for i in indices]
+            noise = np.random.uniform(-0.05, 0.05, size=dimensions) * spacing
+            positions.append(np.array(pos) + noise)
+    return np.array(positions)
+
+
+def initialize_velocities(n_particles, dimensions, target_temp):
+    kb = 1.380649e-23
+    velocities = np.random.normal(0, 1, size=(n_particles, dimensions))
+    velocities -= np.mean(velocities, axis=0)
+    ke = 0.5 * mass_argon * np.sum(velocities ** 2)
+    dof = n_particles * dimensions
+    scale = np.sqrt(target_temp * kb * dof / (2 * ke))
+    velocities *= scale
+    return velocities
+
+
+def compute_rdf(positions, box_size, rcutoff, n_bins):
+    n_particles = positions.shape[0]
+    dr = rcutoff / n_bins
+    rdf_hist = np.zeros(n_bins, dtype=np.float64)  # Specify dtype
+
+    for i in range(n_particles):
+        for j in range(i + 1, n_particles):
+            rij = positions[i] - positions[j]
+            rij -= box_size * np.round(rij / box_size)  # PBC
+            r = np.linalg.norm(rij)
+            if r < rcutoff:
+                bin_index = int(r / dr)
+                if bin_index < n_bins:  # Add safety check
+                    rdf_hist[bin_index] += 2
+
+    # Use consistent volume calculation
+    density = n_particles / box_size**3
+    r_values = dr * (np.arange(n_bins) + 0.5)
+    shell_volumes = 4/3 * np.pi * ((r_values + dr/2)**3 - (r_values - dr/2)**3)
+    ideal_counts = density * shell_volumes * n_particles
+    g_r = np.where(ideal_counts > 0, rdf_hist / ideal_counts, 0)
+    return r_values, g_r
+
+
+def run_simulation(params, compute_rdf_flag=False, rdf_sample_steps=1000, n_bins=100):
+    box_size = (params['n_particles'] * mass_argon / params['density']) ** (1 / params['dimensions'])
+    positions = create_lattice(params['n_particles'], box_size, params['dimensions'])
+    velocities = initialize_velocities(params['n_particles'], params['dimensions'], params['temperature'])
+    dof = params['n_particles'] * params['dimensions']
+
+    temp_list = []
+    rdf_accum = np.zeros(n_bins)
+    rdf_count = 0
+
+    for step in tqdm(range(params['steps']), desc="Running Simulation"):
+        forces, _ = compute_forces_lca(positions, box_size, params['rcutoff'],
+                                       params['sigma'], params['epsilon'], use_pbc=True)
+        velocities += 0.5 * forces / mass_argon * params['dt']
+        positions += velocities * params['dt']
+        positions %= box_size
+        forces, _ = compute_forces_lca(positions, box_size, params['rcutoff'],
+                                       params['sigma'], params['epsilon'], use_pbc=True)
+        velocities += 0.5 * forces / mass_argon * params['dt']
+
+        kinetic = 0.5 * mass_argon * np.sum(velocities ** 2)
+        temp = 2 * kinetic / (dof * 1.380649e-23)
+        temp_list.append(temp)
+
+        if params['thermostat_type'] == 'berendsen':
+            velocities = apply_berendsen_thermostat(velocities, params['temperature'], temp, params['dt'],
+                                                    params['tau_ber'])
+        elif params['thermostat_type'] == 'langevin':
+            velocities = apply_langevin_thermostat(velocities, params['gamma_langevin'], params['dt'],
+                                                   params['temperature'])
+
+        if compute_rdf_flag and step >= params['steps'] - rdf_sample_steps:
+            r_vals, gr = compute_rdf(positions, box_size, params['rcutoff'], n_bins)
+            rdf_accum += gr
+            rdf_count += 1
+
+    rdf_avg = rdf_accum / rdf_count if rdf_count > 0 else None
+    return temp_list, r_vals, rdf_avg
+
+
+params = {
+    'dimensions': 3,
+    'n_particles': 1000,
+    'density': 1374,
+    'dt': 2e-15,
+    'steps': 1000,
+    'temperature': 94.4,
+    'sigma': sigma,
+    'epsilon': epsilon,
+    'rcutoff': 2.5 * sigma,
+    'tau_ber': 1e-13,
+    'gamma_langevin': 1e13,
+    'thermostat_type': 'langevin'
+}
+
+# Add numerical precision control
+np.seterr(all='raise')  # Catch numerical issues
+
+_, r_vals, g_r = run_simulation(params, compute_rdf_flag=True)
+
+if g_r is not None:
+    plt.figure(figsize=(8, 5))
+    plt.plot(r_vals * 1e10, g_r, label=f"T = {params['temperature']} K")
+    plt.xlabel('r (Å)')
+    plt.ylabel('g(r)')
+    plt.title(f"Radial Distribution Function for Argon at {params['temperature']} K")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
